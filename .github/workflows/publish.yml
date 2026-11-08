@@ -1,0 +1,57 @@
+name: Publish Radiant Spark Next
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 9 * * *'
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: radiantspark-next-pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize versioned release source
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import hashlib, zipfile
+          archive = Path('newrepo-release.zip')
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          marker = Path('.release-package.sha256')
+          if not marker.exists() or marker.read_text().strip() != digest:
+              with zipfile.ZipFile(archive) as release:
+                  for entry in release.infolist():
+                      parts = PurePosixPath(entry.filename).parts
+                      if not parts or entry.filename.startswith('/') or '..' in parts or parts[0] in ('.git', '.github') or entry.filename == 'CNAME':
+                          raise ValueError('Unsafe release entry')
+                  release.extractall('.')
+              marker.write_text(digest + '\n')
+          PY
+      - name: Run application tests
+        run: node --test tests/*.cjs
+      - name: Refresh configured authorized deal source
+        env:
+          DEALS_FEED_URL: ${{ secrets.DEALS_FEED_URL }}
+          DEALS_FEED_TOKEN: ${{ secrets.DEALS_FEED_TOKEN }}
+        run: node scripts/sync-deals.cjs
+      - uses: actions/configure-pages@v5
+      - name: Prepare static site
+        run: |
+          mkdir -p _site
+          rsync -a --exclude '/.git' --exclude '/.github' --exclude '/_site' --exclude '/newrepo-release.zip' --exclude '/.release-package.sha256' --exclude '/tests' --exclude '/scripts' ./ _site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@v4
